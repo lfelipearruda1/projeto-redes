@@ -1,0 +1,106 @@
+import json
+import random
+import socket
+from itertools import count
+
+HOST = "127.0.0.1"
+PORT = 5000
+PAYLOAD_SIZE = 3
+MAX_FRAME_BYTES = 4096
+ECO_TIMEOUT_SEC = 0.7
+
+def checksum_bytes(data: bytes) -> int:
+    return sum(data) & 0xFF
+
+def chunk_text(text: str, size: int):
+    for i in range(0, len(text), size):
+        yield text[i : i + size]
+
+def corrupt_checksum(csum: int) -> int:
+    return (csum + 1) & 0xFF
+
+class FramedSocket:
+    def __init__(self, sock: socket.socket) -> None:
+        self.sock = sock
+        self._buffer = b""
+
+    def send_json(self, obj: dict) -> None:
+        data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+        self.sock.sendall(data)
+
+    def recv_json(self, max_bytes: int = MAX_FRAME_BYTES):
+        while b"\n" not in self._buffer:
+            chunk = self.sock.recv(max_bytes)
+            if not chunk:
+                return None
+            self._buffer += chunk
+        line, _, rest = self._buffer.partition(b"\n")
+        self._buffer = rest
+        try:
+            return json.loads(line.decode("utf-8"))
+        except json.JSONDecodeError:
+            return None
+
+def yesno(prompt: str) -> bool:
+    print(prompt)
+    ans = input("> ").strip().lower()
+    return ans in ("s", "sim", "y", "yes")
+
+def main() -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((HOST, PORT))
+    fs = FramedSocket(sock)
+
+    fs.send_json(
+        {
+            "modo_operacao": "texto",
+            "tamanho_max": 2048,
+            "payload_size": PAYLOAD_SIZE,
+        }
+    )
+    hs_resp = fs.recv_json(1024)
+    if not hs_resp or hs_resp.get("status") != "OK":
+        sock.close()
+        return
+
+    id_gen = count(start=1)
+    while True:
+        print("\nDigite sua mensagem (ou 'sair' para encerrar):")
+        msg = input("> ").strip()
+        if msg.lower() in ("sair", "encerrar"):
+            break
+        if not msg:
+            continue
+
+        erro_ativo = yesno("Quer que esta mensagem apresente erro? (s/n)")
+        parts = list(chunk_text(msg, PAYLOAD_SIZE))
+        total = len(parts)
+        msg_id = next(id_gen)
+        corrupt_seq = random.randrange(total) if (erro_ativo and total > 0) else None
+
+        for seq, payload in enumerate(parts):
+            csum = checksum_bytes(payload.encode("utf-8"))
+            pkt_csum = corrupt_checksum(csum) if seq == corrupt_seq else csum
+            fs.send_json(
+                {
+                    "id_msg": msg_id,
+                    "seq": seq,
+                    "total": total,
+                    "payload": payload,
+                    "checksum": pkt_csum,
+                    "error_flag": (seq == corrupt_seq),
+                }
+            )
+
+        sock.settimeout(ECO_TIMEOUT_SEC)
+        try:
+            _ = fs.recv_json()
+        except socket.timeout:
+            pass
+        finally:
+            sock.settimeout(None)
+
+    sock.close()
+
+if __name__ == "__main__":
+    main()
