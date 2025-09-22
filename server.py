@@ -44,9 +44,13 @@ def main() -> None:
     if not hs:
         conn.close(); srv.close(); return
 
-    modo = hs.get("modo_operacao", "texto")
+    modo = str(hs.get("modo_operacao", "")).lower()
     tamanho_max = int(hs.get("tamanho_max", 2048))
     payload_size = int(hs.get("payload_size", 3))
+
+    if modo not in ("individual", "grupo"):
+        fs.send_json({"status": "ERRO", "motivo": "modo_operacao inválido. Use 'individual' ou 'grupo'."})
+        conn.close(); srv.close(); return
 
     fs.send_json(
         {
@@ -85,7 +89,7 @@ def main() -> None:
 
         ok = (checksum_bytes(payload.encode("utf-8")) == recv_csum)
         sufixo = "" if ok else " (FALHA de integridade)"
-        print(f"Pacote {seq + 1}: {payload}{sufixo}")
+        print(f"[{modo.upper()}] Pacote {seq + 1}: {payload}{sufixo}")
 
         partes[seq] = payload
         if len(partes) == total_esperado:

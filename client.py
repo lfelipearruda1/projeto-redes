@@ -46,24 +46,37 @@ def yesno(prompt: str) -> bool:
     ans = input("> ").strip().lower()
     return ans in ("s", "sim", "y", "yes")
 
+def escolher_modo() -> str:
+    while True:
+        print("Escolha o modo de operação: 'individual' ou 'grupo'")
+        modo = input("> ").strip().lower()
+        if modo in ("individual", "grupo"):
+            return modo
+        print("Valor inválido. Digite 'individual' ou 'grupo'.")
+
 def main() -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((HOST, PORT))
     fs = FramedSocket(sock)
 
+    modo = escolher_modo()
     fs.send_json(
         {
-            "modo_operacao": "texto",
+            "modo_operacao": modo,
             "tamanho_max": 2048,
             "payload_size": PAYLOAD_SIZE,
         }
     )
+
     hs_resp = fs.recv_json(1024)
     if not hs_resp or hs_resp.get("status") != "OK":
+        print("Falha no handshake:", hs_resp)
         sock.close()
         return
 
+    print(f"Handshake OK. Modo: {hs_resp.get('modo_operacao')} | janela: {hs_resp.get('window_size')}")
     id_gen = count(start=1)
+
     while True:
         print("\nDigite sua mensagem (ou 'sair' para encerrar):")
         msg = input("> ").strip()
