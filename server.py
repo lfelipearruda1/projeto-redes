@@ -2,7 +2,7 @@ import json
 import socket
 
 HOST = "127.0.0.1"
-PORT = 5000
+PORT = 12000
 MAX_FRAME_BYTES = 4096
 
 def checksum_bytes(data: bytes) -> int:
@@ -52,15 +52,13 @@ def main() -> None:
         fs.send_json({"status": "ERRO", "motivo": "modo_operacao inválido. Use 'individual' ou 'grupo'."})
         conn.close(); srv.close(); return
 
-    fs.send_json(
-        {
-            "status": "OK",
-            "modo_operacao": modo,
-            "tamanho_max": tamanho_max,
-            "payload_size": payload_size,
-            "window_size": 5,
-        }
-    )
+    fs.send_json({
+        "status": "OK",
+        "modo_operacao": modo,
+        "tamanho_max": tamanho_max,
+        "payload_size": payload_size,
+        "window_size": 5,
+    })
 
     current_id = None
     total_esperado = None
@@ -80,20 +78,17 @@ def main() -> None:
         seq = int(pkt["seq"])
         total = int(pkt["total"])
         payload = str(pkt["payload"])
-        recv_csum = int(pkt["checksum"])
 
         if current_id is None or msg_id != current_id:
             current_id = msg_id
             total_esperado = total
             partes = {}
 
-        ok = (checksum_bytes(payload.encode("utf-8")) == recv_csum)
-        sufixo = "" if ok else " (FALHA de integridade)"
-        print(f"[{modo.upper()}] Pacote {seq + 1}: {payload}{sufixo}")
-
         partes[seq] = payload
+        print(f"[{modo.upper()}] Pacote {seq + 1}: {payload}")
+
         if len(partes) == total_esperado:
-            mensagem = "".join(partes[i] for i in range(total_esperado))
+            mensagem = "".join(partes.get(i, "[PACOTE PERDIDO]") for i in range(total_esperado))
             print(f"\nMensagem reconstruída: {mensagem}\n")
             fs.send_json({"tipo": "eco", "id_msg": msg_id, "texto": mensagem})
             current_id = None
