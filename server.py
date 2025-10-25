@@ -1,103 +1,104 @@
-import json
-import socket
+# server.py
+import socket, json
 
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 PORT = 12000
 MAX_FRAME_BYTES = 4096
+MAX_PAYLOAD = 4  
 
-def checksum_bytes(data: bytes) -> int:
-    return sum(data) & 0xFF
+def recv_json_line(fobj):
+    line = fobj.readline()
+    if not line:
+        return None
+    return json.loads(line)
 
-class FramedSocket:
-    def __init__(self, sock: socket.socket) -> None:
-        self.sock = sock
-        self._buffer = b""
+def send_json(conn, obj):
+    data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+    conn.sendall(data)
 
-    def send_json(self, obj: dict) -> None:
-        data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-        self.sock.sendall(data)
+def checksum8(text: str) -> int:
+    return sum(text.encode("utf-8")) & 0xFF
 
-    def recv_json(self, max_bytes: int = MAX_FRAME_BYTES):
-        while b"\n" not in self._buffer:
-            chunk = self.sock.recv(max_bytes)
-            if not chunk:
-                return None
-            self._buffer += chunk
-        line, _, rest = self._buffer.partition(b"\n")
-        self._buffer = rest
-        try:
-            return json.loads(line.decode("utf-8"))
-        except json.JSONDecodeError:
-            return None
-
-def main() -> None:
+def main():
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((HOST, PORT))
     srv.listen(1)
     print(f"[SERVIDOR] Aguardando em {HOST}:{PORT} ...")
 
     conn, addr = srv.accept()
-    fs = FramedSocket(conn)
     print(f"[SERVIDOR] Conectado a {addr}")
+    f = conn.makefile(mode="r", encoding="utf-8", newline="\n")
 
-    hs = fs.recv_json()
-    if not hs:
+    hello = recv_json_line(f)
+    if not hello or hello.get("type") != "HELLO":
+        print("[SERVIDOR] Handshake inválido ou ausente.")
         conn.close(); srv.close(); return
 
-    modo = str(hs.get("modo_operacao", "")).lower()
-    tamanho_max = int(hs.get("tamanho_max", 2048))
-    payload_size = int(hs.get("payload_size", 3))
+    mode = hello.get("mode", "individual")
+    max_len = int(hello.get("max_len", 120))
+    window = int(hello.get("window", 5))
+    if max_len < 30:
+        max_len = 30
 
-    if modo not in ("individual", "grupo"):
-        fs.send_json({"status": "ERRO", "motivo": "modo_operacao inválido. Use 'individual' ou 'grupo'."})
-        conn.close(); srv.close(); return
-
-    fs.send_json({
-        "status": "OK",
-        "modo_operacao": modo,
-        "tamanho_max": tamanho_max,
-        "payload_size": payload_size,
-        "window_size": 5,
-    })
+    send_json(conn, {"type":"HELLO_ACK","ok":True,"window":window,"max_len":max_len})
+    print(f"[SERVIDOR] Handshake OK | mode={mode} max_len={max_len} window={window}")
 
     current_id = None
-    total_esperado = None
+    total_esperado = 0
     partes = {}
 
     while True:
-        pkt = fs.recv_json(tamanho_max)
+        pkt = recv_json_line(f)
         if pkt is None:
             print("[SERVIDOR] Conexão encerrada pelo cliente.")
             break
 
-        required = ("id_msg", "seq", "total", "payload", "checksum")
-        if any(k not in pkt for k in required):
-            continue
-
-        msg_id = int(pkt["id_msg"])
-        seq = int(pkt["seq"])
-        total = int(pkt["total"])
-        payload = str(pkt["payload"])
-
-        if current_id is None or msg_id != current_id:
-            current_id = msg_id
-            total_esperado = total
+        ptype = pkt.get("type")
+        if ptype == "SEND_START":
+            current_id = int(pkt["msg_id"])
+            text_len = int(pkt["text_len"])
             partes = {}
+            total_esperado = 0
+            print(f"\n[RECV] SEND_START msg_id={current_id} text_len={text_len}")
 
-        partes[seq] = payload
-        print(f"[{modo.upper()}] Pacote {seq + 1}: {payload}")
+        elif ptype == "DATA":
+            msg_id = int(pkt["msg_id"])
+            seq = int(pkt["seq"])
+            total = int(pkt["total"])
+            payload = str(pkt["payload"])
 
-        if len(partes) == total_esperado:
-            mensagem = "".join(partes.get(i, "[PACOTE PERDIDO]") for i in range(total_esperado))
-            print(f"\nMensagem reconstruída: {mensagem}\n")
-            fs.send_json({"tipo": "eco", "id_msg": msg_id, "texto": mensagem})
-            current_id = None
-            total_esperado = None
-            partes = {}
+            if len(payload) > MAX_PAYLOAD:
+                print(f"[WARN] payload > {MAX_PAYLOAD} ignorado")
+                continue
+
+            if current_id != msg_id:
+                current_id = msg_id
+                partes = {}
+                total_esperado = 0
+
+            partes[seq] = payload
+            total_esperado = max(total_esperado, total)
+
+            csum = checksum8(payload)
+            print(f"[PKT] msg_id={msg_id} seq={seq}/{total-1} "
+                  f"payload_len={len(payload)} checksum={csum} payload='{payload}'")
+
+            send_json(conn, {"type":"ACK","msg_id":msg_id,"seq":seq,"status":"ok"})
+
+            if len(partes) == total:
+                texto = "".join(partes[i] for i in range(total))
+                print(f"[MSG] reconstruída (msg_id={msg_id}): '{texto}'\n")
+                current_id = None
+                total_esperado = 0
+                partes = {}
+
+        else:
+            pass
 
     conn.close()
     srv.close()
-    print("[SERVIDOR] Conexão encerrada.")
+    print("[SERVIDOR] Encerrado.")
 
 if __name__ == "__main__":
     main()
