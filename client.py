@@ -6,19 +6,15 @@ PORT = 12000
 MAX_FRAME_BYTES = 4096
 MAX_PAYLOAD = 4
 NEGOTIATED_MAX = 120
-MIN_MESSAGE_LEN = 30
+MIN_MSG_LEN = 30
 
 def send_json(conn, obj):
     data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-    if len(data) > MAX_FRAME_BYTES:
-        return
     conn.sendall(data)
 
 def recv_json_line(fobj):
     line = fobj.readline()
     if not line:
-        return None
-    if len(line.encode("utf-8")) > MAX_FRAME_BYTES:
         return None
     return json.loads(line)
 
@@ -31,52 +27,55 @@ def main():
     sock.connect((HOST, PORT))
     f = sock.makefile(mode="r", encoding="utf-8", newline="\n")
 
-    desired_mode = "individual"
-
-    send_json(sock, {"type": "HELLO", "mode": desired_mode, "max_len": NEGOTIATED_MAX, "window": 5})
+    send_json(sock, {"type":"HELLO","mode":"individual","max_len":NEGOTIATED_MAX,"window":5})
     hello_ack = recv_json_line(f)
     if not hello_ack or not hello_ack.get("ok"):
+        print("Handshake falhou:", hello_ack)
         sock.close(); return
 
-    window = int(hello_ack.get("window"))
-    max_len = max(30, int(hello_ack.get("max_len")))
-    mode = desired_mode
+    window = hello_ack.get("window")
+    max_len = hello_ack.get("max_len")
+    print(f"[CLIENT] Handshake OK | window={window} max_len={max_len}")
 
     msg_ids = count(start=1)
 
     while True:
-        msg = input("\nMensagem (ou sair): ").strip()
-        if msg.lower() in ("sair", "encerrar", "exit", "quit"):
-            break
-        if len(msg) < MIN_MESSAGE_LEN:
-            print(f"Mínimo {MIN_MESSAGE_LEN} caracteres.")
+        msg = input("\nDigite a mensagem (ou 'sair'): ").strip()
+        if not msg:
             continue
+        if msg.lower() in ("sair","encerrar","exit","quit"):
+            break
+
+        if len(msg) < MIN_MSG_LEN:
+            print(f"[CLIENT] Mensagem recusada: mínimo {MIN_MSG_LEN} caracteres.")
+            continue
+
         if len(msg) > max_len:
+            print(f"[CLIENT] A mensagem excede max_len ({max_len}). Será truncada nesta etapa.")
             msg = msg[:max_len]
 
         parts = list(chunk_text(msg, MAX_PAYLOAD))
         total = len(parts)
         msg_id = next(msg_ids)
 
-        send_json(sock, {"type": "SEND_START", "msg_id": msg_id, "text_len": len(msg)})
-        resp = recv_json_line(f)
-        if not resp or resp.get("type") != "START_OK":
-            print(f"Recusado pelo servidor: {resp}")
-            continue
+        send_json(sock, {"type":"SEND_START","msg_id":msg_id,"text_len":len(msg)})
 
-        if mode == "individual":
-            for seq, payload in enumerate(parts):
-                send_json(sock, {"type": "DATA", "msg_id": msg_id, "seq": seq, "total": total, "payload": payload})
-                ack = recv_json_line(f)
-                if ack:
-                    print(f"ACK seq={ack.get('seq')}")
-        else:
-            for seq, payload in enumerate(parts):
-                send_json(sock, {"type": "DATA", "msg_id": msg_id, "seq": seq, "total": total, "payload": payload})
+        for seq, payload in enumerate(parts):
+            send_json(sock, {
+                "type":"DATA",
+                "msg_id":msg_id,
+                "seq":seq,
+                "total":total,
+                "payload":payload
+            })
             ack = recv_json_line(f)
-            print(f"ACK final: {ack}")
+            if not ack or ack.get("type") != "ACK":
+                print(f"[CLIENT] ACK ausente/inesperado para seq={seq}: {ack}")
+                break
+            print(f"[ACK] msg_id={ack['msg_id']} seq={ack['seq']} status={ack['status']}")
 
     sock.close()
+    print("[CLIENT] Encerrado.")
 
 if __name__ == "__main__":
     main()
